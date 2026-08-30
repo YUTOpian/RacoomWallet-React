@@ -1,0 +1,163 @@
+import { useEffect, useState } from 'react';
+import { Box, Button, Grid, Card, Typography } from '@mui/material';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
+import AppToolBar from '../../components/AppToolBar';
+import PinDialog from '../../components/PinDialog';
+import { PinCodeHelper, WalletsHelper } from '../../lib/storage';
+import { Environment } from '../../lib/environment';
+import heroWalletSmall from '../../assets/heroimage_wallet_small.png';
+import cautionIcon from '../../assets/icon_caution.png';
+
+export default function WalletBackup() {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const id = searchParams.get('id') || '';
+  const lesson = searchParams.get('lesson') === 'true';
+  // See WalletBackupCaution's matching `back` param - carried forward here so the "完了"
+  // button lands in the right place even when this screen was reached from somewhere other
+  // than a specific wallet's own settings screen.
+  const back = searchParams.get('back') || '';
+  // 'mnemonic' when reached from the app-wide Settings screen's バックアップ item (no wallet
+  // id, `back=/settings/top`) - shows the recovery phrase for the active wallet. 'key' when
+  // reached from a specific wallet's own settings screen (WalletSettings, has `id`) - shows
+  // that wallet's private key. See WalletBackupCaution, which sets this same param.
+  const mode = searchParams.get('mode') === 'mnemonic' ? 'mnemonic' : 'key';
+
+  const [key, setKey] = useState('');
+  const [hasMnemonic, setHasMnemonic] = useState(true);
+  const [walletNotFound, setWalletNotFound] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [showPinDialog, setShowPinDialog] = useState(false);
+
+  const getWallet = async () => (id.length === 0 ? await WalletsHelper.getActive() : await WalletsHelper.get(id));
+
+  useEffect(() => {
+    (async () => {
+      setWalletNotFound(false);
+      setLoadError(false);
+      try {
+        const wallet = await getWallet();
+        if (wallet == null) {
+          setKey('');
+          setWalletNotFound(true);
+          return;
+        }
+        if (mode === 'mnemonic' && !wallet.hasMnemonic()) {
+          // Imported by private key - there is no recovery phrase to show.
+          setHasMnemonic(false);
+          setKey('');
+          return;
+        }
+        setHasMnemonic(true);
+        if (!(await PinCodeHelper.hasSavedCode())) {
+          const secret = mode === 'mnemonic'
+            ? await wallet.decryptMnemonic(PinCodeHelper.defaultPin)
+            : await wallet.decryptSecret(PinCodeHelper.defaultPin);
+          // Treat a blank result the same as a failed decryption - a real private key or
+          // recovery phrase is never empty, so an empty/whitespace-only string here means
+          // something upstream (stored ciphertext, PIN) is wrong, not that the secret
+          // legitimately "is" blank.
+          if (secret == null || secret.trim().length === 0) {
+            setLoadError(true);
+          }
+          setKey(secret || '');
+        } else {
+          setShowPinDialog(true);
+        }
+      } catch (e) {
+        console.error('WalletBackup: failed to load/decrypt wallet secret', e);
+        setLoadError(true);
+        setKey('');
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, mode]);
+
+  const onPassed = async (pin: string) => {
+    try {
+      const wallet = await getWallet();
+      if (wallet != null) {
+        const secret = mode === 'mnemonic'
+          ? await WalletsHelper.decryptMnemonic(wallet.id, pin)
+          : await WalletsHelper.decryptKey(wallet.id, pin);
+        setLoadError(secret == null || secret.trim().length === 0);
+        setKey(secret || '');
+      }
+    } catch (e) {
+      console.error('WalletBackup: failed to decrypt wallet secret after PIN entry', e);
+      setLoadError(true);
+      setKey('');
+    }
+  };
+
+  const goBackSettings = () => {
+    if (Environment.isIos() && Environment.isInStandaloneMode()) {
+      navigate(back || `/wallet/settings?id=${id}`);
+    } else {
+      navigate(-2 as any);
+    }
+  };
+
+  const backParam = back ? `&back=${encodeURIComponent(back)}` : '';
+  const modeParam = mode === 'mnemonic' ? '&mode=mnemonic' : '';
+
+  const words = mode === 'mnemonic' && key.length > 0 ? key.split(' ') : [];
+
+  return (
+    <Box sx={{ minHeight: '100vh' }}>
+      <AppToolBar
+        back={lesson ? `/lesson/key/caution?lesson=true${modeParam}` : `/wallet/backup_caution?id=${id}${backParam}${modeParam}`}
+        title={lesson ? t('common.security_lesson') : (mode === 'mnemonic' ? t('wallet.mnemonic_title') : t('common.backup'))}
+      />
+      <Box component="img" src={heroWalletSmall} sx={{ width: '100%' }} />
+      <Box sx={{ mb: 5 }}>
+        <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', mt: 2, gap: 1 }}>
+          <Box component="img" src={cautionIcon} sx={{ width: 16, height: 16 }} />
+          <span>{t('wallet.key_backup_title')}</span>
+        </Box>
+
+        <Typography align="center" sx={{ mt: 2, mx: 2 }}>{t('wallet.key_backup_message')}</Typography>
+
+        {walletNotFound ? (
+          <Typography align="center" sx={{ mt: 2, mx: 2, color: 'error.main' }}>{t('wallet.backup_wallet_not_found')}</Typography>
+        ) : loadError ? (
+          <Typography align="center" sx={{ mt: 2, mx: 2, color: 'error.main' }}>{t('wallet.backup_decrypt_failed')}</Typography>
+        ) : mode === 'mnemonic' && !hasMnemonic ? (
+          <Typography align="center" sx={{ mt: 2, mx: 2 }}>{t('wallet.mnemonic_unavailable')}</Typography>
+        ) : mode === 'mnemonic' ? (
+          <>
+            <Typography align="center" sx={{ mt: 2, color: 'error.main' }}>{t('wallet.mnemonic_title')}</Typography>
+            <Grid container spacing={0.5} sx={{ justifyContent: 'center', mt: 1, px: 2 }}>
+              {words.map((word, index) => (
+                <Grid key={index} size={4} sx={{ p: 0.5 }}>
+                  <Card variant="outlined" sx={{ bgcolor: 'grey.100', p: 1 }}>
+                    <Typography component="span" sx={{ color: 'text.secondary', fontSize: 12 }}>{index + 1}</Typography>
+                    <Typography component="span" sx={{ ml: 0.5 }}>{word}</Typography>
+                  </Card>
+                </Grid>
+              ))}
+            </Grid>
+          </>
+        ) : (
+          <>
+            <Typography align="center" sx={{ mt: 2, color: 'error.main' }}>Private Key</Typography>
+            <Typography align="center" sx={{ mt: 2, mx: 2, wordBreak: 'break-all' }}>{key}</Typography>
+          </>
+        )}
+      </Box>
+
+      <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', pb: 4 }}>
+        <Button
+          variant="contained" color="primary" size="small"
+          onClick={() => (lesson ? navigate('/lesson/beginner_backup_end') : goBackSettings())}
+        >
+          {t('common.done')}
+        </Button>
+      </Box>
+
+      <PinDialog open={showPinDialog} mode="check" onClose={() => setShowPinDialog(false)} onPass={onPassed} />
+    </Box>
+  );
+}
